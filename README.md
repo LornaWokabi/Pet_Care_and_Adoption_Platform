@@ -1,3 +1,5 @@
+# Pet Care and Adoption Platform
+
 ## Getting started
 
 To get started developing in the browser, click this button:
