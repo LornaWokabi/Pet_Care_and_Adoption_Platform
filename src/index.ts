@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { Server, StableBTreeMap, Principal } from "azle";
+import { Server, StableBTreeMap, Principal, None } from "azle";
 import express from "express";
 
 // Define the User class to represent users (owners, shelters, adopters)
@@ -187,6 +187,7 @@ export default Server(() => {
 
   // Endpoint for creating a new pet
   app.post("/pets", (req, res) => {
+    // Validate the user input
     if (
       !req.body.ownerId ||
       typeof req.body.ownerId !== "string" ||
@@ -210,6 +211,15 @@ export default Server(() => {
       return;
     }
 
+    // Validating the owner ID
+    const owner = usersStorage.get(req.body.ownerId);
+    if (owner === None) {
+      res.status(400).json({
+        error: "Invalid input: Ensure the 'ownerId' is a valid owner ID.",
+      });
+      return;
+    }
+    
     try {
       const pet = new Pet(
         req.body.ownerId,
@@ -262,6 +272,15 @@ export default Server(() => {
       res.status(400).json({
         error:
           "Invalid input: Ensure 'petId', 'adopterId', and 'status' are provided and are strings.",
+      });
+      return;
+    }
+
+    // Validating the pet ID
+    const pet = petsStorage.get(req.body.petId);
+    if (pet === None) {
+      res.status(400).json({
+        error: "Invalid input: Ensure the 'petId' is a valid pet ID.",
       });
       return;
     }
@@ -375,6 +394,37 @@ export default Server(() => {
           "Invalid input: Ensure 'userId', 'feedback', 'rating', and optionally 'petId' and 'eventId' are provided and are of the correct types.",
       });
       return;
+    }
+
+    // Validating the user ID
+    const user = usersStorage.get(req.body.userId);
+    if (user === None) {
+      res.status(400).json({
+        error: "Invalid input: Ensure the 'userId' is a valid user ID.",
+      });
+      return;
+    }
+
+    // Validating the pet ID
+    if (req.body.petId) {
+      const pet = petsStorage.get(req.body.petId);
+      if (pet === None) {
+        res.status(400).json({
+          error: "Invalid input: Ensure the 'petId' is a valid pet ID.",
+        });
+        return;
+      }
+    }
+
+    // Validating the event ID
+    if (req.body.eventId) {
+      const petCareEvent = petCareEventsStorage.get(req.body.eventId);
+      if (petCareEvent === None) {
+        res.status(400).json({
+          error: "Invalid input: Ensure the 'eventId' is a valid pet care event ID.",
+        });
+        return;
+      }
     }
 
     try {
