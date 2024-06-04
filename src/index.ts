@@ -1,6 +1,10 @@
 import { v4 as uuidv4 } from "uuid";
 import { Server, StableBTreeMap, Principal, None } from "azle";
 import express from "express";
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+
+const SECRET_KEY = "your_secret_key"; // Replace with your secret key
 
 // Define the User class to represent users (owners, shelters, adopters)
 class User {
@@ -8,13 +12,15 @@ class User {
   name: string;
   contact: string;
   userType: string; // 'Owner', 'Shelter', 'Adopter'
+  password: string; // Store hashed passwords
   createdAt: Date;
 
-  constructor(name: string, contact: string, userType: string) {
+  constructor(name: string, contact: string, userType: string, password: string) {
     this.id = uuidv4();
     this.name = name;
     this.contact = contact;
     this.userType = userType;
+    this.password = bcrypt.hashSync(password, 10); // Hash the password
     this.createdAt = new Date();
   }
 }
@@ -128,388 +134,286 @@ const petCareEventsStorage = StableBTreeMap<string, PetCareEvent>(3);
 const feedbacksStorage = StableBTreeMap<string, Feedback>(4);
 const donationsStorage = StableBTreeMap<string, Donation>(5);
 
+// Express middleware for authentication
+const authenticateToken = (req, res, next) => {
+  const token = req.header('Authorization')?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access denied' });
+
+  jwt.verify(token, SECRET_KEY, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+};
+
 // Define the express server
 export default Server(() => {
   const app = express();
   app.use(express.json());
 
-  // Endpoint for creating a new user
-  app.post("/users", (req, res) => {
-    if (
-      !req.body.name ||
-      typeof req.body.name !== "string" ||
-      !req.body.contact ||
-      typeof req.body.contact !== "string" ||
-      !req.body.userType ||
-      typeof req.body.userType !== "string"
-    ) {
+  // Endpoint for user registration
+  app.post("/register", (req, res) => {
+    const { name, contact, userType, password } = req.body;
+    if (!name || !contact || !userType || !password) {
       res.status(400).json({
-        error:
-          "Invalid input: Ensure 'name', 'contact', and 'userType' are provided and are strings.",
+        error: "Invalid input: Ensure 'name', 'contact', 'userType', and 'password' are provided.",
       });
       return;
     }
 
     try {
-      const user = new User(
-        req.body.name,
-        req.body.contact,
-        req.body.userType
-      );
+      const user = new User(name, contact, userType, password);
       usersStorage.insert(user.id, user);
-      res.status(201).json({
-        message: "User created successfully",
-        user: user,
-      });
+      res.status(201).json({ message: "User registered successfully", user });
     } catch (error) {
-      console.error("Failed to create user:", error);
-      res.status(500).json({
-        error: "Server error occurred while creating the user.",
-      });
+      console.error("Failed to register user:", error);
+      res.status(500).json({ error: "Server error occurred while registering the user." });
     }
   });
 
-  // Endpoint for retrieving all users
-  app.get("/users", (req, res) => {
+  // Endpoint for user login
+  app.post("/login", (req, res) => {
+    const { contact, password } = req.body;
+    if (!contact || !password) {
+      res.status(400).json({ error: "Invalid input: Ensure 'contact' and 'password' are provided." });
+      return;
+    }
+
+    const user = Array.from(usersStorage.values()).find(user => user.contact === contact);
+    if (!user || !bcrypt.compareSync(password, user.password)) {
+      res.status(400).json({ error: "Invalid contact or password" });
+      return;
+    }
+
+    const token = jwt.sign({ id: user.id, userType: user.userType }, SECRET_KEY, { expiresIn: '1h' });
+    res.json({ token });
+  });
+
+  // Secure endpoint example
+  app.get("/secure-data", authenticateToken, (req, res) => {
+    res.json({ message: "This is secured data." });
+  });
+
+  // Endpoint for creating a new user (Admin only)
+  app.post("/users", authenticateToken, (req, res) => {
+    const { name, contact, userType, password } = req.body;
+    if (req.user.userType !== 'Admin') {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    if (!name || !contact || !userType || !password) {
+      res.status(400).json({ error: "Invalid input: Ensure 'name', 'contact', 'userType', and 'password' are provided." });
+      return;
+    }
+
     try {
-      const users = usersStorage.values();
+      const user = new User(name, contact, userType, password);
+      usersStorage.insert(user.id, user);
+      res.status(201).json({ message: "User created successfully", user });
+    } catch (error) {
+      console.error("Failed to create user:", error);
+      res.status(500).json({ error: "Server error occurred while creating the user." });
+    }
+  });
+
+  // Endpoint for retrieving all users with pagination
+  app.get("/users", authenticateToken, (req, res) => {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const startIndex = (page - 1) * limit;
+    const endIndex = page * limit;
+
+    try {
+      const users = Array.from(usersStorage.values()).slice(startIndex, endIndex);
       res.status(200).json({
         message: "Users retrieved successfully",
-        users: users,
+        users,
+        page,
+        limit,
+        total: usersStorage.size,
       });
     } catch (error) {
       console.error("Failed to retrieve users:", error);
-      res.status(500).json({
-        error: "Server error occurred while retrieving users.",
-      });
+      res.status(500).json({ error: "Server error occurred while retrieving users." });
     }
   });
 
   // Endpoint for creating a new pet
-  app.post("/pets", (req, res) => {
-    // Validate the user input
+  app.post("/pets", authenticateToken, (req, res) => {
+    const { ownerId, name, species, breed, age, description, status } = req.body;
+
     if (
-      !req.body.ownerId ||
-      typeof req.body.ownerId !== "string" ||
-      !req.body.name ||
-      typeof req.body.name !== "string" ||
-      !req.body.species ||
-      typeof req.body.species !== "string" ||
-      !req.body.breed ||
-      typeof req.body.breed !== "string" ||
-      !req.body.age ||
-      typeof req.body.age !== "number" ||
-      !req.body.description ||
-      typeof req.body.description !== "string" ||
-      !req.body.status ||
-      typeof req.body.status !== "string"
+      !ownerId ||
+      typeof ownerId !== "string" ||
+      !name ||
+      typeof name !== "string" ||
+      !species ||
+      typeof species !== "string" ||
+      !breed ||
+      typeof breed !== "string" ||
+      !age ||
+      typeof age !== "number" ||
+      !description ||
+      typeof description !== "string" ||
+      !status ||
+      typeof status !== "string"
     ) {
       res.status(400).json({
-        error:
-          "Invalid input: Ensure all fields are provided and are of the correct types.",
+        error: "Invalid input: Ensure 'ownerId', 'name', 'species', 'breed', 'age', 'description', and 'status' are provided.",
       });
       return;
     }
 
-    // Validating the owner ID
-    const owner = usersStorage.get(req.body.ownerId);
-    if (owner === None) {
-      res.status(400).json({
-        error: "Invalid input: Ensure the 'ownerId' is a valid owner ID.",
-      });
-      return;
-    }
-    
     try {
-      const pet = new Pet(
-        req.body.ownerId,
-        req.body.name,
-        req.body.species,
-        req.body.breed,
-        req.body.age,
-        req.body.description,
-        req.body.status
-      );
+      const pet = new Pet(ownerId, name, species, breed, age, description, status);
       petsStorage.insert(pet.id, pet);
-      res.status(201).json({
-        message: "Pet created successfully",
-        pet: pet,
-      });
+      res.status(201).json({ message: "Pet created successfully", pet });
     } catch (error) {
       console.error("Failed to create pet:", error);
-      res.status(500).json({
-        error: "Server error occurred while creating the pet.",
-      });
+      res.status(500).json({ error: "Server error occurred while creating the pet." });
     }
   });
 
-  // Endpoint for retrieving all pets
-  app.get("/pets", (req, res) => {
+  // Endpoint for retrieving all pets with pagination and filtering
+  app.get("/pets", authenticateToken, (req, res) => {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const species = req.query.species as string | undefined;
+    const status = req.query.status as string | undefined;
+
+    const startIndex = (page - 1) * limit;
+    const endIndex = page * limit;
+
     try {
-      const pets = petsStorage.values();
+      let pets = Array.from(petsStorage.values());
+
+      if (species) {
+        pets = pets.filter(pet => pet.species === species);
+      }
+
+      if (status) {
+        pets = pets.filter(pet => pet.status === status);
+      }
+
+      const paginatedPets = pets.slice(startIndex, endIndex);
       res.status(200).json({
         message: "Pets retrieved successfully",
-        pets: pets,
+        pets: paginatedPets,
+        page,
+        limit,
+        total: pets.length,
       });
     } catch (error) {
       console.error("Failed to retrieve pets:", error);
-      res.status(500).json({
-        error: "Server error occurred while retrieving pets.",
-      });
+      res.status(500).json({ error: "Server error occurred while retrieving pets." });
     }
   });
 
-  // Endpoint for creating a new adoption request
-  app.post("/adoption-requests", (req, res) => {
-    if (
-      !req.body.petId ||
-      typeof req.body.petId !== "string" ||
-      !req.body.adopterId ||
-      typeof req.body.adopterId !== "string" ||
-      !req.body.status ||
-      typeof req.body.status !== "string"
-    ) {
-      res.status(400).json({
-        error:
-          "Invalid input: Ensure 'petId', 'adopterId', and 'status' are provided and are strings.",
-      });
-      return;
-    }
+  // Endpoint for creating an adoption request
+  app.post("/adoption-requests", authenticateToken, (req, res) => {
+    const { petId } = req.body;
+    const adopterId = req.user.id;
 
-    // Validating the pet ID
-    const pet = petsStorage.get(req.body.petId);
-    if (pet === None) {
-      res.status(400).json({
-        error: "Invalid input: Ensure the 'petId' is a valid pet ID.",
-      });
+    if (!petId || typeof petId !== "string") {
+      res.status(400).json({ error: "Invalid input: Ensure 'petId' is provided." });
       return;
     }
 
     try {
-      const adoptionRequest = new AdoptionRequest(
-        req.body.petId,
-        req.body.adopterId,
-        req.body.status
-      );
+      const adoptionRequest = new AdoptionRequest(petId, adopterId, "Pending");
       adoptionRequestsStorage.insert(adoptionRequest.id, adoptionRequest);
-      res.status(201).json({
-        message: "Adoption request created successfully",
-        adoptionRequest: adoptionRequest,
-      });
+      res.status(201).json({ message: "Adoption request created successfully", adoptionRequest });
     } catch (error) {
       console.error("Failed to create adoption request:", error);
-      res.status(500).json({
-        error: "Server error occurred while creating the adoption request.",
-      });
+      res.status(500).json({ error: "Server error occurred while creating the adoption request." });
     }
   });
 
-  // Endpoint for retrieving all adoption requests
-  app.get("/adoption-requests", (req, res) => {
-    try {
-      const adoptionRequests = adoptionRequestsStorage.values();
-      res.status(200).json({
-        message: "Adoption requests retrieved successfully",
-        adoptionRequests: adoptionRequests,
-      });
-    } catch (error) {
-      console.error("Failed to retrieve adoption requests:", error);
-      res.status(500).json({
-        error: "Server error occurred while retrieving adoption requests.",
-      });
-    }
-  });
+  // Endpoint for creating a pet care event
+  app.post("/pet-care-events", authenticateToken, (req, res) => {
+    const { title, description, dateTime, location } = req.body;
+    const organizerId = req.user.id;
 
-  // Endpoint for creating a new pet care event
-  app.post("/pet-care-events", (req, res) => {
     if (
-      !req.body.title ||
-      typeof req.body.title !== "string" ||
-      !req.body.description ||
-      typeof req.body.description !== "string" ||
-      !req.body.dateTime ||
-      !req.body.location ||
-      typeof req.body.location !== "string" ||
-      !req.body.organizerId ||
-      typeof req.body.organizerId !== "string"
+      !title ||
+      typeof title !== "string" ||
+      !description ||
+      typeof description !== "string" ||
+      !dateTime ||
+      !location ||
+      typeof location !== "string"
     ) {
       res.status(400).json({
-        error:
-          "Invalid input: Ensure all fields are provided and are of the correct types.",
+        error: "Invalid input: Ensure 'title', 'description', 'dateTime', and 'location' are provided.",
       });
       return;
     }
 
     try {
-      const petCareEvent = new PetCareEvent(
-        req.body.title,
-        req.body.description,
-        new Date(req.body.dateTime),
-        req.body.location,
-        req.body.organizerId
-      );
+      const eventDate = new Date(dateTime);
+      const petCareEvent = new PetCareEvent(title, description, eventDate, location, organizerId);
       petCareEventsStorage.insert(petCareEvent.id, petCareEvent);
-      res.status(201).json({
-        message: "Pet care event created successfully",
-        petCareEvent: petCareEvent,
-      });
+      res.status(201).json({ message: "Pet care event created successfully", petCareEvent });
     } catch (error) {
       console.error("Failed to create pet care event:", error);
-      res.status(500).json({
-        error: "Server error occurred while creating the pet care event.",
-      });
+      res.status(500).json({ error: "Server error occurred while creating the pet care event." });
     }
   });
 
-  // Endpoint for retrieving all pet care events
-  app.get("/pet-care-events", (req, res) => {
-    try {
-      const petCareEvents = petCareEventsStorage.values();
-      res.status(200).json({
-        message: "Pet care events retrieved successfully",
-        petCareEvents: petCareEvents,
-      });
-    } catch (error) {
-      console.error("Failed to retrieve pet care events:", error);
-      res.status(500).json({
-        error: "Server error occurred while retrieving pet care events.",
-      });
-    }
-  });
+  // Endpoint for creating feedback
+  app.post("/feedbacks", authenticateToken, (req, res) => {
+    const { petId, eventId, feedback, rating } = req.body;
+    const userId = req.user.id;
 
-  // Endpoint for creating new feedback
-  app.post("/feedbacks", (req, res) => {
     if (
-      !req.body.userId ||
-      typeof req.body.userId !== "string" ||
-      !req.body.feedback ||
-      typeof req.body.feedback !== "string" ||
-      !req.body.rating ||
-      typeof req.body.rating !== "number" ||
-      (req.body.petId && typeof req.body.petId !== "string") ||
-      (req.body.eventId && typeof req.body.eventId !== "string")
+      !feedback ||
+      typeof feedback !== "string" ||
+      !rating ||
+      typeof rating !== "number" ||
+      (petId && typeof petId !== "string") ||
+      (eventId && typeof eventId !== "string")
     ) {
       res.status(400).json({
-        error:
-          "Invalid input: Ensure 'userId', 'feedback', 'rating', and optionally 'petId' and 'eventId' are provided and are of the correct types.",
+        error: "Invalid input: Ensure 'feedback', 'rating', and optionally 'petId' or 'eventId' are provided.",
       });
       return;
-    }
-
-    // Validating the user ID
-    const user = usersStorage.get(req.body.userId);
-    if (user === None) {
-      res.status(400).json({
-        error: "Invalid input: Ensure the 'userId' is a valid user ID.",
-      });
-      return;
-    }
-
-    // Validating the pet ID
-    if (req.body.petId) {
-      const pet = petsStorage.get(req.body.petId);
-      if (pet === None) {
-        res.status(400).json({
-          error: "Invalid input: Ensure the 'petId' is a valid pet ID.",
-        });
-        return;
-      }
-    }
-
-    // Validating the event ID
-    if (req.body.eventId) {
-      const petCareEvent = petCareEventsStorage.get(req.body.eventId);
-      if (petCareEvent === None) {
-        res.status(400).json({
-          error: "Invalid input: Ensure the 'eventId' is a valid pet care event ID.",
-        });
-        return;
-      }
     }
 
     try {
-      const feedback = new Feedback(
-        req.body.userId,
-        req.body.petId || null,
-        req.body.eventId || null,
-        req.body.feedback,
-        req.body.rating
-      );
-      feedbacksStorage.insert(feedback.id, feedback);
-      res.status(201).json({
-        message: "Feedback created successfully",
-        feedback: feedback,
-      });
+      const feedbackEntry = new Feedback(userId, petId || null, eventId || null, feedback, rating);
+      feedbacksStorage.insert(feedbackEntry.id, feedbackEntry);
+      res.status(201).json({ message: "Feedback submitted successfully", feedbackEntry });
     } catch (error) {
-      console.error("Failed to create feedback:", error);
-      res.status(500).json({
-        error: "Server error occurred while creating the feedback.",
-      });
+      console.error("Failed to submit feedback:", error);
+      res.status(500).json({ error: "Server error occurred while submitting feedback." });
     }
   });
 
-  // Endpoint for retrieving all feedback
-  app.get("/feedbacks", (req, res) => {
-    try {
-      const feedbacks = feedbacksStorage.values();
-      res.status(200).json({
-        message: "Feedback retrieved successfully",
-        feedbacks: feedbacks,
-      });
-    } catch (error) {
-      console.error("Failed to retrieve feedback:", error);
-      res.status(500).json({
-        error: "Server error occurred while retrieving feedback.",
-      });
-    }
-  });
+  // Endpoint for creating a donation
+  app.post("/donations", authenticateToken, (req, res) => {
+    const { amount } = req.body;
+    const donorId = req.user.id;
 
-  // Endpoint for creating a new donation
-  app.post("/donations", (req, res) => {
-    if (
-      !req.body.donorId ||
-      typeof req.body.donorId !== "string" ||
-      !req.body.amount ||
-      typeof req.body.amount !== "number"
-    ) {
-      res.status(400).json({
-        error:
-          "Invalid input: Ensure 'donorId' is provided as a string and 'amount' is provided as a number.",
-      });
+    if (!amount || typeof amount !== "number") {
+      res.status(400).json({ error: "Invalid input: Ensure 'amount' is provided." });
       return;
     }
 
     try {
-      const donation = new Donation(req.body.donorId, req.body.amount);
+      const donation = new Donation(donorId, amount);
       donationsStorage.insert(donation.id, donation);
-      res.status(201).json({
-        message: "Donation created successfully",
-        donation: donation,
-      });
+      res.status(201).json({ message: "Donation made successfully", donation });
     } catch (error) {
-      console.error("Failed to create donation:", error);
-      res.status(500).json({
-        error: "Server error occurred while creating the donation.",
-      });
+      console.error("Failed to make donation:", error);
+      res.status(500).json({ error: "Server error occurred while making the donation." });
     }
   });
 
-  // Endpoint for retrieving all donations
-  app.get("/donations", (req, res) => {
-    try {
-      const donations = donationsStorage.values();
-      res.status(200).json({
-        message: "Donations retrieved successfully",
-        donations: donations,
-      });
-    } catch (error) {
-      console.error("Failed to retrieve donations:", error);
-      res.status(500).json({
-        error: "Server error occurred while retrieving donations.",
-      });
-    }
+  // Additional error handling for unknown routes
+  app.use((req, res) => {
+    res.status(404).json({ error: "Not Found" });
   });
 
-  // Start the server
-  return app.listen();
+  return app;
 });
